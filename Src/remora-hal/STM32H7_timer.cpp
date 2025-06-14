@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include "STM32H7_timer.h"
-#include "remora/thread/timerInterrupt.h"
-#include "remora/thread/pruThread.h"
+#include "../remora-core/thread/timerInterrupt.h"
+#include "../remora-core/thread/pruThread.h"
 
 STM32H7_timer::STM32H7_timer(TIM_TypeDef* _timer, IRQn_Type _irq, uint32_t _frequency, pruThread* _ownerPtr, int _irqPriority)
     : timer(_timer), irq(_irq), irqPriority(_irqPriority)

@@ -7,9 +7,9 @@
 #include <memory>
 #include <algorithm>
 
-#include "remora/remora.h"
-#include "remora/comms/commsInterface.h"
-#include "remora/modules/moduleInterrupt.h"
+#include "../remora-core/remora.h"
+#include "../remora-core/comms/commsInterface.h"
+#include "../remora-core/modules/moduleInterrupt.h"
 
 typedef struct
 {
