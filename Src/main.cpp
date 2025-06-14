@@ -23,7 +23,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include <cstring>
 #include <sys/errno.h>
 
-#include "remora/remora.h"
+#include "remora-core/remora.h"
 #include "remora-hal/STM32H7_SPIComms.h"
 #include "remora-hal/STM32H7_timer.h"
 

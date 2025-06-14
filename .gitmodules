@@ -1,0 +1,3 @@
+[submodule "Src/remora-core"]
+	path = Src/remora-core
+	url = https://github.com/remora-cnc/remora-core
