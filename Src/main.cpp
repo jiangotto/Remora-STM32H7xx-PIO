@@ -48,6 +48,16 @@ extern "C" {
 
 int main(void)
 {
+#ifdef HAS_BOOTLOADER
+    HAL_RCC_DeInit();
+    HAL_DeInit();
+    extern uint8_t _FLASH_VectorTable;
+    __disable_irq();
+    SCB->VTOR = (uint32_t)&_FLASH_VectorTable;
+    __DSB();
+    __enable_irq();
+#endif
+
 	MPU_Config();
 	HAL_Init();
 	SystemClock_Config();
