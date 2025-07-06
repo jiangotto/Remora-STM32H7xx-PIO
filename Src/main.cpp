@@ -69,7 +69,6 @@ int main(void)
 
   __HAL_RCC_DMA1_CLK_ENABLE();
 
-	MX_GPIO_Init(); 			// used for SD card detect
 	MX_USART1_UART_Init();
 	MX_SDMMC1_SD_Init();
 	MX_FATFS_Init();
