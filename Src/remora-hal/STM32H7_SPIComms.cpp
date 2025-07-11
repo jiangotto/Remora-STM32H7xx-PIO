@@ -11,16 +11,200 @@ STM32H7_SPIComms::STM32H7_SPIComms(volatile rxData_t* _ptrRxData, volatile txDat
     spiHandle.Instance = spiType;
     ptrRxDMABuffer = &rxDMABuffer;
 
-    irqNss = EXTI4_IRQn;
+    irqNss = SPI_CS_IRQ;
     irqDMAtx = DMA1_Stream0_IRQn;
     irqDMArx = DMA1_Stream1_IRQn;
 }
 
-STM32H7_SPIComms::~STM32H7_SPIComms() {
+STM32H7_SPIComms::STM32H7_SPIComms(volatile rxData_t* _ptrRxData, volatile txData_t* _ptrTxData, std::string _mosiPortAndPin, std::string _misoPortAndPin, std::string _clkPortAndPin, std::string _csPortAndPin) :
+	ptrRxData(_ptrRxData),
+	ptrTxData(_ptrTxData),
+    mosiPortAndPin(_mosiPortAndPin),
+    misoPortAndPin(_misoPortAndPin),
+	clkPortAndPin(_clkPortAndPin),
+    csPortAndPin(_csPortAndPin)
+{
+    ptrRxDMABuffer = &rxDMABuffer;
 
+    irqNss = SPI_CS_IRQ;
+    irqDMAtx = DMA1_Stream0_IRQn;
+    irqDMArx = DMA1_Stream1_IRQn;
+
+    mosiPinName = portAndPinToPinName(mosiPortAndPin.c_str());
+    misoPinName = portAndPinToPinName(misoPortAndPin.c_str());
+    clkPinName = portAndPinToPinName(clkPortAndPin.c_str());
+    csPinName = portAndPinToPinName(csPortAndPin.c_str());
+
+    spiHandle.Instance = (SPI_TypeDef* )spi_get_peripheral_name(mosiPinName, misoPinName, clkPinName);
+}
+
+
+STM32H7_SPIComms::~STM32H7_SPIComms() {
+}
+
+SPIName STM32H7_SPIComms::spi_get_peripheral_name(PinName mosi, PinName miso, PinName sclk)
+{
+    SPIName spi_mosi = (SPIName)pinmap_peripheral(mosi, PinMap_SPI_MOSI);
+    SPIName spi_miso = (SPIName)pinmap_peripheral(miso, PinMap_SPI_MISO);
+    SPIName spi_sclk = (SPIName)pinmap_peripheral(sclk, PinMap_SPI_SCLK);
+
+    SPIName spi_per;
+
+    // MISO or MOSI may be not connected
+    if (miso == NC) {
+        spi_per = (SPIName)pinmap_merge(spi_mosi, spi_sclk);
+    } else if (mosi == NC) {
+        spi_per = (SPIName)pinmap_merge(spi_miso, spi_sclk);
+    } else {
+        SPIName spi_data = (SPIName)pinmap_merge(spi_mosi, spi_miso);
+        spi_per = (SPIName)pinmap_merge(spi_data, spi_sclk);
+    }
+
+    return spi_per;
 }
 
 void STM32H7_SPIComms::init() {
+
+    // Configure the NSS (chip select) piin as interrupt
+    csPin = new Pin(csPortAndPin, GPIO_MODE_IT_RISING, GPIO_NOPULL, GPIO_SPEED_FREQ_LOW, 0);
+    delete csPin;
+
+    uint32_t function;
+
+    // Configure GPIO for SPI
+    function = STM_PIN_AFNUM(pinmap_function(mosiPinName, PinMap_SPI_MOSI));
+    mosiPin = new Pin(mosiPortAndPin, GPIO_MODE_AF_PP, GPIO_NOPULL, GPIO_SPEED_FREQ_LOW, function);
+
+    function = STM_PIN_AFNUM(pinmap_function(misoPinName, PinMap_SPI_MISO));
+    misoPin = new Pin(misoPortAndPin, GPIO_MODE_AF_PP, GPIO_NOPULL, GPIO_SPEED_FREQ_LOW, function);
+
+    function = STM_PIN_AFNUM(pinmap_function(clkPinName, PinMap_SPI_SCLK));
+    clkPin = new Pin(clkPortAndPin, GPIO_MODE_AF_PP, GPIO_NOPULL, GPIO_SPEED_FREQ_LOW, function);
+
+    function = STM_PIN_AFNUM(pinmap_function(csPinName, PinMap_SPI_SSEL));
+    csPin = new Pin(csPortAndPin, GPIO_MODE_AF_PP, GPIO_NOPULL, GPIO_SPEED_FREQ_LOW, function);
+    
+    spiHandle.Init.Mode           			= SPI_MODE_SLAVE;
+    spiHandle.Init.Direction      			= SPI_DIRECTION_2LINES;
+    spiHandle.Init.DataSize       			= SPI_DATASIZE_8BIT;
+    spiHandle.Init.CLKPolarity    			= SPI_POLARITY_LOW;
+    spiHandle.Init.CLKPhase       			= SPI_PHASE_1EDGE;
+    spiHandle.Init.NSS            			= SPI_NSS_HARD_INPUT;
+    spiHandle.Init.FirstBit       			= SPI_FIRSTBIT_MSB;
+    spiHandle.Init.TIMode         			= SPI_TIMODE_DISABLE;
+    spiHandle.Init.CRCCalculation 			= SPI_CRCCALCULATION_DISABLE;
+    spiHandle.Init.CRCPolynomial  			= 0x0;
+    spiHandle.Init.NSSPMode 				= SPI_NSS_PULSE_DISABLE;
+    spiHandle.Init.NSSPolarity 				= SPI_NSS_POLARITY_LOW;
+    spiHandle.Init.FifoThreshold 			= SPI_FIFO_THRESHOLD_01DATA;
+    spiHandle.Init.TxCRCInitializationPattern = SPI_CRC_INITIALIZATION_ALL_ZERO_PATTERN;
+    spiHandle.Init.RxCRCInitializationPattern = SPI_CRC_INITIALIZATION_ALL_ZERO_PATTERN;
+    spiHandle.Init.MasterSSIdleness 		= SPI_MASTER_SS_IDLENESS_00CYCLE;
+    spiHandle.Init.MasterInterDataIdleness 	= SPI_MASTER_INTERDATA_IDLENESS_00CYCLE;
+    spiHandle.Init.MasterReceiverAutoSusp 	= SPI_MASTER_RX_AUTOSUSP_DISABLE;
+    spiHandle.Init.MasterKeepIOState 		= SPI_MASTER_KEEP_IO_STATE_DISABLE;
+    spiHandle.Init.IOSwap 					= SPI_IO_SWAP_DISABLE;
+
+    if (spiHandle.Instance == SPI1)
+    {
+        printf("Initialising SPI1 slave\n");
+
+        HAL_SPI_Init(&this->spiHandle);
+
+    	// Peripheral clock enable
+    	__HAL_RCC_SPI1_CLK_ENABLE();
+
+        printf("Initialising DMA for SPI\n");
+
+        hdma_spi_tx.Instance 					= DMA1_Stream0;
+        hdma_spi_tx.Init.Request 				= DMA_REQUEST_SPI1_TX;
+        hdma_spi_tx.Init.Direction 				= DMA_MEMORY_TO_PERIPH;
+        hdma_spi_tx.Init.PeriphInc 				= DMA_PINC_DISABLE;
+        hdma_spi_tx.Init.MemInc 				= DMA_MINC_ENABLE;
+        hdma_spi_tx.Init.PeriphDataAlignment 	= DMA_PDATAALIGN_BYTE;
+        hdma_spi_tx.Init.MemDataAlignment 		= DMA_MDATAALIGN_BYTE;
+        hdma_spi_tx.Init.Mode 					= DMA_CIRCULAR;
+        hdma_spi_tx.Init.Priority 				= DMA_PRIORITY_LOW;
+        hdma_spi_tx.Init.FIFOMode 				= DMA_FIFOMODE_DISABLE;
+
+        HAL_DMA_Init(&hdma_spi_tx);
+        __HAL_LINKDMA(&spiHandle, hdmatx, hdma_spi_tx);
+
+        hdma_spi_rx.Instance 					= DMA1_Stream1;
+        hdma_spi_rx.Init.Request 				= DMA_REQUEST_SPI1_RX;
+        hdma_spi_rx.Init.Direction 				= DMA_PERIPH_TO_MEMORY;
+        hdma_spi_rx.Init.PeriphInc 				= DMA_PINC_DISABLE;
+        hdma_spi_rx.Init.MemInc 				= DMA_MINC_ENABLE;
+        hdma_spi_rx.Init.PeriphDataAlignment 	= DMA_PDATAALIGN_BYTE;
+        hdma_spi_rx.Init.MemDataAlignment 		= DMA_MDATAALIGN_BYTE;
+        hdma_spi_rx.Init.Mode 					= DMA_CIRCULAR;
+        hdma_spi_rx.Init.Priority 				= DMA_PRIORITY_LOW;
+        hdma_spi_rx.Init.FIFOMode 				= DMA_FIFOMODE_DISABLE;
+
+        HAL_DMA_Init(&hdma_spi_rx);
+        __HAL_LINKDMA(&spiHandle, hdmarx, hdma_spi_rx);
+    }
+    else if (spiHandle.Instance == SPI2)
+    {
+        printf("Initialising SPI2 slave\n");
+
+        HAL_SPI_Init(&this->spiHandle);
+
+    	// Peripheral clock enable
+    	__HAL_RCC_SPI2_CLK_ENABLE();
+
+        printf("Initialising DMA for SPI\n");
+
+        hdma_spi_tx.Instance 					= DMA1_Stream0;
+        hdma_spi_tx.Init.Request 				= DMA_REQUEST_SPI2_TX;
+        hdma_spi_tx.Init.Direction 				= DMA_MEMORY_TO_PERIPH;
+        hdma_spi_tx.Init.PeriphInc 				= DMA_PINC_DISABLE;
+        hdma_spi_tx.Init.MemInc 				= DMA_MINC_ENABLE;
+        hdma_spi_tx.Init.PeriphDataAlignment 	= DMA_PDATAALIGN_BYTE;
+        hdma_spi_tx.Init.MemDataAlignment 		= DMA_MDATAALIGN_BYTE;
+        hdma_spi_tx.Init.Mode 					= DMA_CIRCULAR;
+        hdma_spi_tx.Init.Priority 				= DMA_PRIORITY_LOW;
+        hdma_spi_tx.Init.FIFOMode 				= DMA_FIFOMODE_DISABLE;
+
+        HAL_DMA_Init(&hdma_spi_tx);
+        __HAL_LINKDMA(&spiHandle, hdmatx, hdma_spi_tx);
+
+        hdma_spi_rx.Instance 					= DMA1_Stream1;
+        hdma_spi_rx.Init.Request 				= DMA_REQUEST_SPI2_RX;
+        hdma_spi_rx.Init.Direction 				= DMA_PERIPH_TO_MEMORY;
+        hdma_spi_rx.Init.PeriphInc 				= DMA_PINC_DISABLE;
+        hdma_spi_rx.Init.MemInc 				= DMA_MINC_ENABLE;
+        hdma_spi_rx.Init.PeriphDataAlignment 	= DMA_PDATAALIGN_BYTE;
+        hdma_spi_rx.Init.MemDataAlignment 		= DMA_MDATAALIGN_BYTE;
+        hdma_spi_rx.Init.Mode 					= DMA_CIRCULAR;
+        hdma_spi_rx.Init.Priority 				= DMA_PRIORITY_LOW;
+        hdma_spi_rx.Init.FIFOMode 				= DMA_FIFOMODE_DISABLE;
+
+        HAL_DMA_Init(&hdma_spi_rx);
+        __HAL_LINKDMA(&spiHandle, hdmarx, hdma_spi_rx);
+    }
+
+    printf("Initialising DMA for Memory to Memory transfer\n");
+
+    hdma_memtomem.Instance 					= DMA1_Stream2;
+    hdma_memtomem.Init.Request 				= DMA_REQUEST_MEM2MEM;
+    hdma_memtomem.Init.Direction 			= DMA_MEMORY_TO_MEMORY;
+    hdma_memtomem.Init.PeriphInc 			= DMA_PINC_ENABLE;
+    hdma_memtomem.Init.MemInc 				= DMA_MINC_ENABLE;
+    hdma_memtomem.Init.PeriphDataAlignment 	= DMA_PDATAALIGN_BYTE;
+    hdma_memtomem.Init.MemDataAlignment 	= DMA_MDATAALIGN_BYTE;
+    hdma_memtomem.Init.Mode 				= DMA_NORMAL;
+    hdma_memtomem.Init.Priority 			= DMA_PRIORITY_LOW;
+    hdma_memtomem.Init.FIFOMode 			= DMA_FIFOMODE_ENABLE;
+    hdma_memtomem.Init.FIFOThreshold 		= DMA_FIFO_THRESHOLD_FULL;
+    hdma_memtomem.Init.MemBurst 			= DMA_MBURST_SINGLE;
+    hdma_memtomem.Init.PeriphBurst 			= DMA_PBURST_SINGLE;
+
+    HAL_DMA_Init(&hdma_memtomem);
+}
+
+
+void STM32H7_SPIComms::init_old() {
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     if(spiHandle.Instance == SPI1)
@@ -29,6 +213,8 @@ void STM32H7_SPIComms::init() {
         // Configure GPIO pin : PA_4
 
         __HAL_RCC_GPIOC_CLK_ENABLE();
+
+        //csPin = new Pin(SPI_CS, GPIO_MODE_IT_RISING, GPIO_NOPULL, );
 
         GPIO_InitStruct.Pin = GPIO_PIN_4;
         GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;

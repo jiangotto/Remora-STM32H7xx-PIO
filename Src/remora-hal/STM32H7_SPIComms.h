@@ -10,6 +10,7 @@
 #include "../remora-core/remora.h"
 #include "../remora-core/comms/commsInterface.h"
 #include "../remora-core/modules/moduleInterrupt.h"
+#include "pin/pin.h"
 
 typedef struct
 {
@@ -48,9 +49,26 @@ private:
     DMA_HandleTypeDef   		hdma_memtomem;
     HAL_StatusTypeDef   		dmaStatus;
 
+    std::string                 mosiPortAndPin; 
+    std::string                 misoPortAndPin; 
+    std::string                 clkPortAndPin; 
+    std::string                 csPortAndPin; 
+
+    PinName                     mosiPinName;
+    PinName                     misoPinName;
+    PinName                     clkPinName;
+    PinName                     csPinName;
+
+    Pin*                        mosiPin;
+    Pin*                        misoPin;
+    Pin*                        clkPin;
+    Pin*                        csPin;
+
     uint8_t						interruptType;
 
     bool						newWriteData;
+
+    SPIName spi_get_peripheral_name(PinName mosi, PinName miso, PinName sclk);
 
 	HAL_StatusTypeDef startMultiBufferDMASPI(uint8_t*, uint8_t*, uint8_t*, uint8_t*, uint16_t);
 	int getActiveDMAmemory(DMA_HandleTypeDef*);
@@ -62,9 +80,11 @@ private:
 
 public:
 	STM32H7_SPIComms(volatile rxData_t*, volatile txData_t*, SPI_TypeDef*);
+    STM32H7_SPIComms(volatile rxData_t*, volatile txData_t*, std::string, std::string, std::string, std::string);
 	virtual ~STM32H7_SPIComms();
 
     void init(void);
+    void init_old(void);
     void start(void);
     void tasks(void);
 };

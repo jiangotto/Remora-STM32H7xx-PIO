@@ -8,11 +8,21 @@ Pin::Pin(const std::string& portAndPin, int mode)
     initialisePin();
 }
 
+Pin::Pin(const std::string& portAndPin, uint32_t gpio_mode, uint32_t gpio_pull, uint32_t gpio_speed, uint32_t gpio_alt) 
+    : portAndPin(portAndPin), gpio_mode(gpio_mode), gpio_pull(gpio_pull), gpio_speed(gpio_speed), gpio_alt(gpio_alt) {
+    configurePin();
+    enableClock();
+    initialiseGPIO();
+}
+
 Pin::Pin(const std::string& portAndPin, int mode, int modifier) 
     : portAndPin(portAndPin), mode(mode), modifier(modifier) {
     configurePin();
     enableClock();
     initialisePin();
+}
+
+Pin::~Pin() {
 }
 
 void Pin::configurePin() {
@@ -54,6 +64,16 @@ void Pin::initialisePin() {
     GPIO_InitStruct.Mode = mode;
     GPIO_InitStruct.Pull = pull;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOx, &GPIO_InitStruct);
+}
+
+void Pin::initialiseGPIO() {
+    HAL_GPIO_WritePin(GPIOx, pin, GPIO_PIN_RESET);
+    GPIO_InitStruct.Pin = pin;
+    GPIO_InitStruct.Mode = gpio_mode;
+    GPIO_InitStruct.Pull = gpio_pull;
+    GPIO_InitStruct.Speed = gpio_speed;
+    GPIO_InitStruct.Alternate = gpio_alt;
     HAL_GPIO_Init(GPIOx, &GPIO_InitStruct);
 }
 
