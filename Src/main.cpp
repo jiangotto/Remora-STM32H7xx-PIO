@@ -73,7 +73,8 @@ int main(void)
 	MX_SDMMC1_SD_Init();
 	MX_FATFS_Init();
 
-  auto comms = std::make_unique<STM32H7_SPIComms>(&rxData, &txData, SPI1);
+  //auto comms = std::make_unique<STM32H7_SPIComms>(&rxData, &txData, SPI1);
+  auto comms = std::make_unique<STM32H7_SPIComms>(&rxData, &txData, SPI_MOSI, SPI_MISO, SPI_CLK, SPI_CS);
 	auto commsHandler = std::make_shared<CommsHandler>();
 	commsHandler->setInterface(std::move(comms));
 
