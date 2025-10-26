@@ -30,24 +30,34 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <linux/spi/spidev.h>
+#include <gpiod.h>
+
+#define SPI_DEV_PATH "/dev/spidev1.0"
 
 
 // Include these in the source directory when using "halcompile --install remora-spi.c"
 
 // Using BCM2835 driver library by Mike McCauley, why reinvent the wheel!
 // http://www.airspayce.com/mikem/bcm2835/index.html
-#include "bcm2835.h"
-#include "bcm2835.c"
+// #include "bcm2835.h"
+// #include "bcm2835.c"
 
-// Raspberry Pi 5 uses the RP1
-#include "rp1lib.h"
-#include "rp1lib.c"
-#include "gpiochip_rp1.h"
-#include "gpiochip_rp1.c"
+// // Raspberry Pi 5 uses the RP1
+// #include "rp1lib.h"
+// #include "rp1lib.c"
+// #include "gpiochip_rp1.h"
+// #include "gpiochip_rp1.c"
 #include "spi-dw.h"
 #include "spi-dw.c"
 
-#include "dtcboards.h"
+// #include "dtcboards.h"
 
 #include "remora.h"
 #include "remoraStatus.h"
@@ -58,8 +68,6 @@
 MODULE_AUTHOR("Scott Alford AKA scotta");
 MODULE_DESCRIPTION("Driver for Remora STM32 control boards")
 MODULE_LICENSE("GPL v3");
-
-#define RPI5_RP1_PERI_BASE 0x7c000000
 
 /***********************************************************************
 *                STRUCTURES AND GLOBAL VARIABLES                       *
@@ -151,9 +159,6 @@ static int 			comp_id;				// component ID
 static const char 	*modname = MODNAME;
 static const char 	*prefix = PREFIX;
 
-static bool			bcm;					// use BCM2835 driver
-static bool			rp1;					// use RP1 driver
-
 static int 			num_chan = 0;			// number of step generators configured
 static long 		old_dtns;				// update_freq function period in nsec - (THIS IS RUNNING IN THE PI)
 static double		dt;						// update_freq period in seconds  - (THIS IS RUNNING IN THE PI)
@@ -170,32 +175,29 @@ typedef enum CONTROL { POSITION, VELOCITY, INVALID } CONTROL;
 char *ctrl_type[JOINTS] = { "p" };
 RTAPI_MP_ARRAY_STRING(ctrl_type,JOINTS,"control type (pos or vel)");
 
-int PRU_base_freq = -1;
+int PRU_base_freq = 200000;
 RTAPI_MP_INT(PRU_base_freq, "PRU base thread frequency");
 
-// for BCM based SPI (Raspberry Pi 5)
-int SPI_clk_div = -1;
-RTAPI_MP_INT(SPI_clk_div, "SPI clock divider");
-
-// for RP1 based SPI (Raspberry Pi 5)
-int SPI_num = -1;
-RTAPI_MP_INT(SPI_num, "SPI number");
-
-int CS_num = -1;
+int CS_num = 0;
 RTAPI_MP_INT(CS_num, "CS number");
 
-int32_t SPI_freq = -1;
+int32_t SPI_freq = 20000000;
 RTAPI_MP_INT(SPI_freq, "SPI frequency");
 
-static int reset_gpio_pin = 25;				// RPI GPIO pin number used to force watchdog reset of the PRU 
+static int reset_gpio_pin = 233;				// RPI GPIO pin number used to force watchdog reset of the PRU 
+
+struct gpiod_chip * reset_chip;      //GPIO控制器句柄
+struct gpiod_line * reset_line;      //GPIO引脚句柄
+int spi_fd;
+static unsigned  mode = SPI_MODE_0;
+static uint8_t bits = 8;
+static uint8_t lsb_first = 0; // 将这个值设置为 0 表示 MSB 首先，设置为 1 则表示 LSB 首先
 
 
 /***********************************************************************
 *                  LOCAL FUNCTION DECLARATIONS                         *
 ************************************************************************/
 static int rt_peripheral_init(void);
-static int rt_bcm2835_init(void);
-static int rt_rp1lib_init(void);
 
 static void update_freq(void *arg, long period);
 static void spi_write();
@@ -254,9 +256,6 @@ int rtapi_app_main(void)
 		return -1;
 	}
 	
-	bcm = false;
-	rp1 = false;
-	
 	// initialise the gpio and spi peripherals
 	if(!rt_peripheral_init())
 	{
@@ -277,16 +276,6 @@ int rtapi_app_main(void)
 	retval = hal_pin_bit_newf(HAL_OUT, &(data->SPIstatus),
 			comp_id, "%s.SPI-status", prefix);
 	if (retval != 0) goto error;
-
-	if (bcm == true)
-	{
-		bcm2835_gpio_fsel(reset_gpio_pin, BCM2835_GPIO_FSEL_OUTP);
-
-	}
-	else if (rp1 == true)
-	{
-		gpio_set_fsel(reset_gpio_pin, GPIO_FSEL_OUTPUT);
-	}
 	
 	retval = hal_pin_bit_newf(HAL_IN, &(data->PRUreset),
 			comp_id, "%s.PRU-reset", prefix);
@@ -461,335 +450,66 @@ void rtapi_app_exit(void)
 
 int rt_peripheral_init(void)
 {
-	FILE *fp;
-    int i, j;
-    char buf[256];
-    ssize_t buflen;
-    char *cptr;
-    const int DTC_MAX = 8;
-    const char *dtcs[DTC_MAX + 1];
-    
-    // assume were only running on >RPi3
-    
-    if ((fp = fopen("/proc/device-tree/compatible" , "rb"))){
-
-        // Read the 'compatible' string-list from the device-tree
-        buflen = fread(buf, 1, sizeof(buf), fp);
-        if(buflen < 0) {
-            rtapi_print_msg(RTAPI_MSG_ERR,"Failed to read platform identity.\n");
-            return -1;
-        }
-
-        // Decompose the device-tree buffer into a string-list with the pointers to
-        // each string in dtcs. Don't go beyond the buffer's size.
-        memset(dtcs, 0, sizeof(dtcs));
-        for(i = 0, cptr = buf; i < DTC_MAX && cptr; i++) {
-            dtcs[i] = cptr;
-            j = strlen(cptr);
-            if((cptr - buf) + j + 1 < buflen)
-                cptr += j + 1;
-            else
-                cptr = NULL;
-        }
-
-        for(i = 0; dtcs[i] != NULL; i++) {
-            if(        !strcmp(dtcs[i], DTC_RPI_MODEL_4B)
-                ||    !strcmp(dtcs[i], DTC_RPI_MODEL_4CM)
-                ||    !strcmp(dtcs[i], DTC_RPI_MODEL_400)
-                ||    !strcmp(dtcs[i], DTC_RPI_MODEL_3BP)
-                ||    !strcmp(dtcs[i], DTC_RPI_MODEL_3AP)
-                ||    !strcmp(dtcs[i], DTC_RPI_MODEL_3B)) {
-                rtapi_print_msg(RTAPI_MSG_ERR, "Raspberry Pi 3 or 4, using BCM2835 driver\n");
-                bcm = true;
-                break;    // Found our supported board
-            } else if(!strcmp(dtcs[i], DTC_RPI_MODEL_5B) || !strcmp(dtcs, DTC_RPI_MODEL_5CM)) {
-                rtapi_print_msg(RTAPI_MSG_ERR, "Raspberry Pi 5, using rp1 driver\n");
-                rp1 = true;
-                break;    // Found our supported board
-            } else {
-                rtapi_print_msg(RTAPI_MSG_ERR, "Error, RPi not detected\n");
-                return -1;
-            }
-        }
-        fclose(fp);
-    } else {
-        rtapi_print_msg(RTAPI_MSG_ERR,"Cannot open '/proc/device-tree/compatible' for read.\n");
-    }    	  	
-        
-	if (bcm == true)
-	{
-		// Map the RPi BCM2835 peripherals - uses "rtapi_open_as_root" in place of "open"
-		if (!rt_bcm2835_init())
-		{
-		  rtapi_print_msg(RTAPI_MSG_ERR,"rt_bcm2835_init failed. Are you running with root privlages??\n");
-		  return -1;
-		}
-
-		// Set the SPI0 pins to the Alt 0 function to enable SPI0 access, setup CS register
-		// and clear TX and RX fifos
-		if (!bcm2835_spi_begin())
-		{
-		  rtapi_print_msg(RTAPI_MSG_ERR,"bcm2835_spi_begin failed. Are you running with root privlages??\n");
-		  return -1;
-		}
-
-		// Configure SPI0
-		bcm2835_spi_setBitOrder(BCM2835_SPI_BIT_ORDER_MSBFIRST);      // The default
-		bcm2835_spi_setDataMode(BCM2835_SPI_MODE0);                   // The default
-
-		//bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_128);		// 3.125MHz on RPI3
-		//bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_64);		// 6.250MHz on RPI3
-		//bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_32);		// 12.5MHz on RPI3
-		//bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_16);		// 25MHz on RPI3
-		
-		// check if the default SPI clock divider has been overriden at the command line
-		if (SPI_clk_div != -1)
-		{
-			// check that the setting is a power of 2
-			if ((SPI_clk_div & (SPI_clk_div - 1)) == 0)
-			{
-				bcm2835_spi_setClockDivider(SPI_clk_div);
-				rtapi_print_msg(RTAPI_MSG_INFO,"PRU: SPI clk divider overridden and set to %d\n", SPI_clk_div);			
-			}
-			else
-			{
-				// it's not a power of 2
-				rtapi_print_msg(RTAPI_MSG_ERR,"ERROR: PRU SPI clock divider incorrect\n");
-				return -1;
-			}	
-		}
-		else
-		{
-			bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_16);
-			rtapi_print_msg(RTAPI_MSG_INFO,"PRU: SPI default clk divider set to 16\n");
-		}
-
-		bcm2835_spi_chipSelect(BCM2835_SPI_CS0);                      // The default
-		bcm2835_spi_setChipSelectPolarity(BCM2835_SPI_CS0, LOW);      // the default
-
-
-		/* RPI_GPIO_P1_19        = 10 		MOSI when SPI0 in use
-		 * RPI_GPIO_P1_21        =  9 		MISO when SPI0 in use
-		 * RPI_GPIO_P1_23        = 11 		CLK when SPI0 in use
-		 * RPI_GPIO_P1_24        =  8 		CE0 when SPI0 in use
-		 * RPI_GPIO_P1_26        =  7 		CE1 when SPI0 in use
-		 */
-
-		// Configure pullups on SPI0 pins - source termination and CS high (does this allows for higher clock frequencies??? wiring is more important here)
-		bcm2835_gpio_set_pud(RPI_GPIO_P1_19, BCM2835_GPIO_PUD_DOWN);	// MOSI
-		bcm2835_gpio_set_pud(RPI_GPIO_P1_21, BCM2835_GPIO_PUD_DOWN);	// MISO
-		bcm2835_gpio_set_pud(RPI_GPIO_P1_24, BCM2835_GPIO_PUD_UP);		// CS0			
-	}
-	else if (rp1 == true)
-	{
-		if (!rt_rp1lib_init())
-		{
-			rtapi_print_msg(RTAPI_MSG_ERR,"rt_rp1_init failed.\n");
-			return -1;
-		}
-
-		if (SPI_num == -1) SPI_num = 0; // default to SPI0
-		if (CS_num == -1) CS_num = 0; // default to CS0
-		if (SPI_freq == -1) SPI_freq = 20000000; // default to 20MHz
-		
-		if (!rp1spi_init(SPI_num, CS_num, SPI_MODE_0, SPI_freq))  // SPIx, CSx, mode, freq
-		{
-			rtapi_print_msg(RTAPI_MSG_ERR,"rp1spi_init failed.\n");
-			return -1;
-		}
-	}
-	else
-	{
-		return -1;
-	}
-
-}
-
-// This is the same as the standard bcm2835 library except for the use of
-// "rtapi_open_as_root" in place of "open"
-
-int rt_bcm2835_init(void)
-{
-    int  memfd;
-    int  ok;
-    FILE *fp;
-
-    if (debug) 
-    {
-        bcm2835_peripherals = (uint32_t*)BCM2835_PERI_BASE;
-
-	bcm2835_pads = bcm2835_peripherals + BCM2835_GPIO_PADS/4;
-	bcm2835_clk  = bcm2835_peripherals + BCM2835_CLOCK_BASE/4;
-	bcm2835_gpio = bcm2835_peripherals + BCM2835_GPIO_BASE/4;
-	bcm2835_pwm  = bcm2835_peripherals + BCM2835_GPIO_PWM/4;
-	bcm2835_spi0 = bcm2835_peripherals + BCM2835_SPI0_BASE/4;
-	bcm2835_bsc0 = bcm2835_peripherals + BCM2835_BSC0_BASE/4;
-	bcm2835_bsc1 = bcm2835_peripherals + BCM2835_BSC1_BASE/4;
-	bcm2835_st   = bcm2835_peripherals + BCM2835_ST_BASE/4;
-	bcm2835_aux  = bcm2835_peripherals + BCM2835_AUX_BASE/4;
-	bcm2835_spi1 = bcm2835_peripherals + BCM2835_SPI1_BASE/4;
-
-	return 1; /* Success */
-    }
-
-    /* Figure out the base and size of the peripheral address block
-    // using the device-tree. Required for RPi2/3/4, optional for RPi 1
-    */
-    if ((fp = fopen(BMC2835_RPI2_DT_FILENAME , "rb")))
-    {
-        unsigned char buf[16];
-        uint32_t base_address;
-        uint32_t peri_size;
-        if (fread(buf, 1, sizeof(buf), fp) >= 8)
-        {
-            base_address = (buf[4] << 24) |
-              (buf[5] << 16) |
-              (buf[6] << 8) |
-              (buf[7] << 0);
-            
-            peri_size = (buf[8] << 24) |
-              (buf[9] << 16) |
-              (buf[10] << 8) |
-              (buf[11] << 0);
-            
-            if (!base_address)
-            {
-                /* looks like RPI 4 */
-                base_address = (buf[8] << 24) |
-                      (buf[9] << 16) |
-                      (buf[10] << 8) |
-                      (buf[11] << 0);
-                      
-                peri_size = (buf[12] << 24) |
-                (buf[13] << 16) |
-                (buf[14] << 8) |
-                (buf[15] << 0);
-            }
-            /* check for valid known range formats */
-            if ((buf[0] == 0x7e) &&
-                    (buf[1] == 0x00) &&
-                    (buf[2] == 0x00) &&
-                    (buf[3] == 0x00) &&
-                    ((base_address == BCM2835_PERI_BASE) || (base_address == BCM2835_RPI2_PERI_BASE) || (base_address == BCM2835_RPI4_PERI_BASE)))
-            {
-                bcm2835_peripherals_base = (off_t)base_address;
-                bcm2835_peripherals_size = (size_t)peri_size;
-                if( base_address == BCM2835_RPI4_PERI_BASE )
-                {
-                    pud_type_rpi4 = 1;
-                }
-            }
-        
-        }
-        
-	fclose(fp);
-    }
-    /* else we are prob on RPi 1 with BCM2835, and use the hardwired defaults */
-
-    /* Now get ready to map the peripherals block 
-     * If we are not root, try for the new /dev/gpiomem interface and accept
-     * the fact that we can only access GPIO
-     * else try for the /dev/mem interface and get access to everything
-     */
-    memfd = -1;
-    ok = 0;
-    if (geteuid() == 0)
-    {
-      /* Open the master /dev/mem device */
-      if ((memfd = rtapi_open_as_root("/dev/mem", O_RDWR | O_SYNC) ) < 0) 
-	{
-	  fprintf(stderr, "bcm2835_init: Unable to open /dev/mem: %s\n",
-		  strerror(errno)) ;
-	  goto exit;
-	}
-      
-      /* Base of the peripherals block is mapped to VM */
-      bcm2835_peripherals = mapmem("gpio", bcm2835_peripherals_size, memfd, bcm2835_peripherals_base);
-      if (bcm2835_peripherals == MAP_FAILED) goto exit;
-      
-      /* Now compute the base addresses of various peripherals, 
-      // which are at fixed offsets within the mapped peripherals block
-      // Caution: bcm2835_peripherals is uint32_t*, so divide offsets by 4
-      */
-      bcm2835_gpio = bcm2835_peripherals + BCM2835_GPIO_BASE/4;
-      bcm2835_pwm  = bcm2835_peripherals + BCM2835_GPIO_PWM/4;
-      bcm2835_clk  = bcm2835_peripherals + BCM2835_CLOCK_BASE/4;
-      bcm2835_pads = bcm2835_peripherals + BCM2835_GPIO_PADS/4;
-      bcm2835_spi0 = bcm2835_peripherals + BCM2835_SPI0_BASE/4;
-      bcm2835_bsc0 = bcm2835_peripherals + BCM2835_BSC0_BASE/4; /* I2C */
-      bcm2835_bsc1 = bcm2835_peripherals + BCM2835_BSC1_BASE/4; /* I2C */
-      bcm2835_st   = bcm2835_peripherals + BCM2835_ST_BASE/4;
-      bcm2835_aux  = bcm2835_peripherals + BCM2835_AUX_BASE/4;
-      bcm2835_spi1 = bcm2835_peripherals + BCM2835_SPI1_BASE/4;
-
-      ok = 1;
-    }
-    else
-    {
-      /* Not root, try /dev/gpiomem */
-      /* Open the master /dev/mem device */
-      if ((memfd = open("/dev/gpiomem", O_RDWR | O_SYNC) ) < 0) 
-	{
-	  fprintf(stderr, "bcm2835_init: Unable to open /dev/gpiomem: %s\n",
-		  strerror(errno)) ;
-	  goto exit;
-	}
-      
-      /* Base of the peripherals block is mapped to VM */
-      bcm2835_peripherals_base = 0;
-      bcm2835_peripherals = mapmem("gpio", bcm2835_peripherals_size, memfd, bcm2835_peripherals_base);
-      if (bcm2835_peripherals == MAP_FAILED) goto exit;
-      bcm2835_gpio = bcm2835_peripherals;
-      ok = 1;
-    }
-
-exit:
-    if (memfd >= 0)
-        close(memfd);
-
-    if (!ok)
-	bcm2835_close();
-
-    return ok;
-}
-
-int rt_rp1lib_init(void)
-{
-    uint64_t phys_addr = RP1_BAR1;
-
-    DEBUG_PRINT("Initialising RP1 library: %s\n", __func__);
-
-    // rp1_chip is declared in gpiochip_rp1.c
-    chip = &rp1_chip;
-
-    inst = rp1_create_instance(chip, phys_addr, NULL);
-    if (!inst)
+	// GPIO
+	
+	/*获取GPIO控制器*/
+    reset_chip = gpiod_chip_open("/dev/gpiochip1");
+    if(reset_chip == NULL){
+        rtapi_print_msg(RTAPI_MSG_ERR,"gpiod_chip_open error\n");
         return -1;
+    }
 
-    inst->phys_addr = phys_addr;
+	/*获取GPIO引脚*/
+    reset_line = gpiod_chip_get_line(chip, reset_gpio_pin);
+    if(reset_line == NULL){
+        rtapi_print_msg(RTAPI_MSG_ERR,"gpiod_chip_get_line error\n");
+        goto release_line;
+    }
 
-    // map memory
-    inst->mem_fd = rtapi_open_as_root("/dev/mem", O_RDWR | O_SYNC);
-    if (inst->mem_fd < 0)
-        return errno;
+	/*设置GPIO为输出模式*/
+    ret = gpiod_line_request_output(reset_line, "remora-reset", 0);
+    if(ret < 0){
+		rtapi_print_msg(RTAPI_MSG_ERR,"gpiod_line_request_output error\n");
+        goto release_chip;
+    }
 
-    inst->priv = mmap(
-        NULL,
-        RP1_BAR1_LEN,
-        PROT_READ | PROT_WRITE,
-        MAP_SHARED,
-        inst->mem_fd,
-        inst->phys_addr
-        );
+	// SPI
 
-    DEBUG_PRINT("Base address: %11lx, size: %lx, mapped at address: %p\n", inst->phys_addr, RP1_BAR1_LEN, inst->priv);
+	int ret = 0;
+    //打开 SPI 设备
+    spi_fd = open(SPI_DEV_PATH, O_RDWR);
+    if (spi_fd < 0)
+		rtapi_print_msg(RTAPI_MSG_ERR,"can't open spi\n");
 
-    if (inst->priv == MAP_FAILED)
-        return errno;
+    //spi mode 设置SPI 工作模式
+    ret = ioctl(spi_fd, SPI_IOC_WR_MODE32, &mode);
+    if (ret == -1)
+		rtapi_print_msg(RTAPI_MSG_ERR,"can't set spi mode\n");
 
-    return 1;
+	//bits per word  设置一个字节的位数
+    ret = ioctl(spi_fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
+    if (ret == -1)
+		rtapi_print_msg(RTAPI_MSG_ERR,"can't set bits per word\n");
+
+    //max speed hz  设置SPI 最高工作频率
+    ret = ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &SPI_freq);
+    if (ret == -1)
+		rtapi_print_msg(RTAPI_MSG_ERR,"can't set max speed hz\n");
+
+	// 设置 MSB 优先（默认值为 true）
+	ret = ioctl(spi_fd, SPI_IOC_WR_LSB_FIRST, &lsb_first)
+	if (ret == -1)
+		rtapi_print_msg(RTAPI_MSG_ERR,"can't set MSB first\n");
+
+ 
+release_line:
+    /*释放GPIO引脚*/
+    gpiod_line_release(reset_line);
+release_chip:
+    /*释放GPIO控制器*/
+    gpiod_chip_close(reset_chip);
+    return -1;		
 }
-
 
 void update_freq(void *arg, long period)
 {
@@ -1014,25 +734,11 @@ void spi_read()
 	
 	if (*(data->PRUreset))
 	{ 
-		if (bcm == true)
-		{
-			bcm2835_gpio_set(reset_gpio_pin);
-		}
-		else if (rp1 == true)
-		{
-			gpio_set(reset_gpio_pin);
-		}
+		gpiod_line_set_value(reset_line, 1);
     }
 	else
 	{
-		if (bcm == true)
-		{
-			bcm2835_gpio_clr(reset_gpio_pin);
-		}
-		else if (rp1 == true)
-		{
-			gpio_clear(reset_gpio_pin);
-		}
+		gpiod_line_set_value(reset_line, 0);
     }
 	
 	
@@ -1190,14 +896,23 @@ void spi_transfer()
 {
 	// send and receive data to and from the Remora PRU concurrently
 
-	if (bcm == true)
-	{
-		bcm2835_spi_transfernb(txData.txBuffer, rxData.rxBuffer, SPIBUFSIZE);
-	}
-	else if (rp1 == true)
-	{
-		rp1spi_transfer(0, txData.txBuffer, rxData.rxBuffer, SPIBUFSIZE);
-	}
+	int ret;
+
+    struct spi_ioc_transfer tr = {
+        .tx_buf = (unsigned long)txData.txBuffer,
+        .rx_buf = (unsigned long)rxData.rxBuffer,
+        .len = SPIBUFSIZE,
+        .delay_usecs = 0,
+        .speed_hz = SPI_freq,
+        .bits_per_word = bits,
+        .tx_nbits = 1,
+        .rx_nbits = 1
+    };
+
+    ret = ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr);
+    
+    if (ret < 1)
+		rtapi_print_msg(RTAPI_MSG_ERR,"can't send spi message\n");
 }
 
 void checkRemoraStatus(uint8_t status)
