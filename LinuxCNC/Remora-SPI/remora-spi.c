@@ -181,7 +181,7 @@ RTAPI_MP_INT(PRU_base_freq, "PRU base thread frequency");
 int CS_num = 0;
 RTAPI_MP_INT(CS_num, "CS number");
 
-int32_t SPI_freq = 20000000;
+int32_t SPI_freq = 10000000;
 RTAPI_MP_INT(SPI_freq, "SPI frequency");
 
 static int reset_gpio_pin = 233;				// RPI GPIO pin number used to force watchdog reset of the PRU 
