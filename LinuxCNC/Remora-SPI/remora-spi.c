@@ -450,8 +450,8 @@ void rtapi_app_exit(void)
 
 int rt_peripheral_init(void)
 {
+	int ret = 0;
 	// GPIO
-	
 	/*获取GPIO控制器*/
     reset_chip = gpiod_chip_open("/dev/gpiochip1");
     if(reset_chip == NULL){
@@ -460,7 +460,7 @@ int rt_peripheral_init(void)
     }
 
 	/*获取GPIO引脚*/
-    reset_line = gpiod_chip_get_line(chip, reset_gpio_pin);
+    reset_line = gpiod_chip_get_line(reset_chip, reset_gpio_pin);
     if(reset_line == NULL){
         rtapi_print_msg(RTAPI_MSG_ERR,"gpiod_chip_get_line error\n");
         goto release_line;
@@ -473,9 +473,7 @@ int rt_peripheral_init(void)
         goto release_chip;
     }
 
-	// SPI
-
-	int ret = 0;
+	// SPI	
     //打开 SPI 设备
     spi_fd = open(SPI_DEV_PATH, O_RDWR);
     if (spi_fd < 0)
@@ -497,7 +495,7 @@ int rt_peripheral_init(void)
 		rtapi_print_msg(RTAPI_MSG_ERR,"can't set max speed hz\n");
 
 	// 设置 MSB 优先（默认值为 true）
-	ret = ioctl(spi_fd, SPI_IOC_WR_LSB_FIRST, &lsb_first)
+	ret = ioctl(spi_fd, SPI_IOC_WR_LSB_FIRST, &lsb_first);
 	if (ret == -1)
 		rtapi_print_msg(RTAPI_MSG_ERR,"can't set MSB first\n");
 
